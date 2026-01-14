@@ -54,6 +54,10 @@ def list_messages(
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
+
+    Returns:
+        List of message objects with fields: id, chat_jid, chat_name, sender, sender_name, content, timestamp,
+        is_from_me, media_type.
     """
     messages = whatsapp_list_messages(
         after=after,
@@ -85,6 +89,10 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+
+    Returns:
+        List of chat objects with fields: jid, name, last_message_time, last_message, last_sender,
+        last_sender_name, last_is_from_me.
     """
     chats = whatsapp_list_chats(
         query=query,
