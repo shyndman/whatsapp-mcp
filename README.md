@@ -16,6 +16,37 @@ Here's an example of what you can do when it's connected to Claude.
 
 ## Installation
 
+### Docker (recommended)
+
+1. **Build the image**
+
+   ```bash
+   docker build -t whatsapp-mcp .
+   ```
+
+2. **Run the container**
+
+   ```bash
+   docker run -p 8000:8000 -v whatsapp_store:/app/whatsapp-bridge/store whatsapp-mcp
+   ```
+
+   The first run prints a QR code in the container logs. Auth and message history persist in the `whatsapp_store` volume.
+
+3. **Configure your MCP client for HTTP transport**
+
+   ```json
+   {
+     "mcpServers": {
+       "whatsapp": {
+         "transport": "http",
+         "url": "http://localhost:8000/mcp/"
+       }
+     }
+   }
+   ```
+
+   Save this config for Claude Desktop or Cursor (paths below), then restart the client.
+
 ### Prerequisites
 
 - Go
@@ -24,7 +55,7 @@ Here's an example of what you can do when it's connected to Claude.
 - UV (Python package manager), install with `curl -LsSf https://astral.sh/uv/install.sh | sh`
 - FFmpeg (_optional_) - Only needed for audio messages. If you want to send audio files as playable WhatsApp voice messages, they must be in `.ogg` Opus format. With FFmpeg installed, the MCP server will automatically convert non-Opus audio files. Without FFmpeg, you can still send raw audio files using the `send_file` tool.
 
-### Steps
+### Local (non-Docker) Steps
 
 1. **Clone this repository**
 
@@ -46,21 +77,23 @@ Here's an example of what you can do when it's connected to Claude.
 
    After approximately 20 days, you will might need to re-authenticate.
 
-3. **Connect to the MCP server**
+3. **Run the MCP server (HTTP)**
 
-   Copy the below json with the appropriate {{PATH}} values:
+   ```bash
+   cd whatsapp-mcp-server
+   uv run main.py
+   ```
+
+   Keep this running; the server listens on `http://localhost:8000/mcp/`.
+
+4. **Configure your MCP client for HTTP transport**
 
    ```json
    {
      "mcpServers": {
        "whatsapp": {
-         "command": "{{PATH_TO_UV}}", // Run `which uv` and place the output here
-         "args": [
-           "--directory",
-           "{{PATH_TO_SRC}}/whatsapp-mcp/whatsapp-mcp-server", // cd into the repo, run `pwd` and enter the output here + "/whatsapp-mcp-server"
-           "run",
-           "main.py"
-         ]
+         "transport": "http",
+         "url": "http://localhost:8000/mcp/"
        }
      }
    }
@@ -78,7 +111,7 @@ Here's an example of what you can do when it's connected to Claude.
    ~/.cursor/mcp.json
    ```
 
-4. **Restart Claude Desktop / Cursor**
+5. **Restart Claude Desktop / Cursor**
 
    Open Claude Desktop and you should now see WhatsApp as an available integration.
 
