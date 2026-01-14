@@ -1,0 +1,40 @@
+## 1. Implementation
+- [ ] 1.1 Create `.dockerignore` at the repo root and exclude `.venv/`, `__pycache__/`, `*.pyc`, `.git/`, and any local build artifacts.
+- [ ] 1.2 Add a repo-root `Dockerfile` with a multi-stage build skeleton (Go builder + Python runtime).
+- [ ] 1.3 In the Go builder stage:
+  - [ ] 1.3.1 Install CGO prerequisites (`gcc`, `libsqlite3-dev`) if not already present.
+  - [ ] 1.3.2 Set `WORKDIR /src/whatsapp-bridge`.
+  - [ ] 1.3.3 Copy `whatsapp-bridge/go.mod` and `whatsapp-bridge/go.sum`, then run `go mod download`.
+  - [ ] 1.3.4 Copy the full `whatsapp-bridge/` source and build `whatsapp-bridge` to `/out/whatsapp-bridge` with `CGO_ENABLED=1`.
+- [ ] 1.4 In the Python runtime stage:
+  - [ ] 1.4.1 Base image `python:3.11-slim` (Debian).
+  - [ ] 1.4.2 Install `ffmpeg` and `ca-certificates` via `apt-get`.
+  - [ ] 1.4.3 Copy the `uv` binaries from a pinned `ghcr.io/astral-sh/uv:<version>` image to `/bin/uv` and `/bin/uvx`.
+  - [ ] 1.4.4 Set `WORKDIR /app` and copy the repo contents into `/app`.
+  - [ ] 1.4.5 Run `uv sync --locked` inside `/app/whatsapp-mcp-server` with `UV_NO_DEV=1`.
+  - [ ] 1.4.6 Copy the Go bridge binary from `/out/whatsapp-bridge` into `/app/whatsapp-bridge/whatsapp-bridge`.
+  - [ ] 1.4.7 Add `VOLUME /app/whatsapp-bridge/store` and `EXPOSE 8000`.
+- [ ] 1.5 Create an entrypoint script (for example, `docker/entrypoint.sh`) that:
+  - [ ] 1.5.1 Creates `/app/whatsapp-bridge/store` if missing.
+  - [ ] 1.5.2 Starts the Go bridge from `/app/whatsapp-bridge` in the background.
+  - [ ] 1.5.3 Runs the MCP server from `/app/whatsapp-mcp-server` in the foreground using `uv run main.py`.
+- [ ] 1.6 Update `whatsapp-mcp-server/main.py` to run Streamable HTTP transport:
+  - [ ] 1.6.1 `mcp.run(transport="http", host="0.0.0.0", port=8000)`.
+- [ ] 1.7 Update `README.md` with Docker usage details:
+  - [ ] 1.7.1 Build command (`docker build -t whatsapp-mcp .`).
+  - [ ] 1.7.2 Run command with MCP port mapping and volume (`docker run -p 8000:8000 -v whatsapp_store:/app/whatsapp-bridge/store whatsapp-mcp`).
+  - [ ] 1.7.3 MCP client config pointing to `http://localhost:8000/mcp/`.
+  - [ ] 1.7.4 Note about QR code display and auth persistence via volume.
+
+## 2. Validation
+- [ ] 2.1 Run `docker build -t whatsapp-mcp .` and confirm it completes successfully.
+- [ ] 2.2 Run the container with port mappings and volume:
+  - [ ] 2.2.1 `docker run -p 8000:8000 -v whatsapp_store:/app/whatsapp-bridge/store whatsapp-mcp`.
+- [ ] 2.3 Confirm the logs show both:
+  - [ ] 2.3.1 The bridge REST server starting on port `8080`.
+  - [ ] 2.3.2 The MCP server starting on port `8000`.
+- [ ] 2.4 Confirm the MCP endpoint is reachable:
+  - [ ] 2.4.1 `curl -I http://localhost:8000/mcp/` returns an HTTP response (any status is acceptable as long as the connection succeeds).
+- [ ] 2.6 Confirm volume persistence:
+  - [ ] 2.6.1 Stop the container.
+  - [ ] 2.6.2 Restart with the same volume and verify `whatsapp-bridge/store/whatsapp.db` still exists.
