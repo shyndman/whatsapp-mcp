@@ -3,6 +3,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
 import os.path
+import logging
 import requests
 import json
 import audio
@@ -13,6 +14,7 @@ WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 CONTACT_NAME_PRIORITY = ("full_name", "business_name", "first_name", "push_name")
 CONTACT_NAME_CACHE: Dict[str, str] = {}
 CONTACT_CACHE_LOADED = False
+LOGGER = logging.getLogger("whatsapp-mcp")
 
 @dataclass
 class Message:
@@ -61,6 +63,13 @@ def normalize_contact_value(value: Optional[str]) -> Optional[str]:
     return trimmed if trimmed else None
 
 
+def is_numeric_name(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    stripped = name.strip()
+    return stripped.isdigit()
+
+
 def select_contact_display_name(contact: Dict[str, Optional[str]]) -> Optional[str]:
     """Choose the highest-priority contact name."""
     for field in CONTACT_NAME_PRIORITY:
@@ -81,8 +90,8 @@ def is_device_authenticated() -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM whatsmeow_device LIMIT 1")
         return cursor.fetchone() is not None
-    except sqlite3.Error as e:
-        print(f"Database error while checking device authentication: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error while checking device authentication")
         return False
     finally:
         if 'conn' in locals():
@@ -96,6 +105,7 @@ def ensure_contact_cache_loaded() -> None:
         return
     if not is_device_authenticated():
         return
+    LOGGER.info("Loading contact cache")
     try:
         conn = sqlite3.connect(WHATSAPP_DB_PATH)
         cursor = conn.cursor()
@@ -119,8 +129,9 @@ def ensure_contact_cache_loaded() -> None:
                 cache[contact_jid] = display_name
         CONTACT_NAME_CACHE = cache
         CONTACT_CACHE_LOADED = True
-    except sqlite3.Error as e:
-        print(f"Database error while loading contacts: {e}")
+        LOGGER.info("Contact cache loaded", extra={"count": len(cache)})
+    except sqlite3.Error:
+        LOGGER.exception("Database error while loading contacts")
     finally:
         if 'conn' in locals():
             conn.close()
@@ -128,7 +139,8 @@ def ensure_contact_cache_loaded() -> None:
 
 def resolve_contact_name(jid: Optional[str]) -> Optional[str]:
     """Return a cached contact name for a full JID."""
-    if not jid or is_group_jid(jid):
+    is_group = is_group_jid(jid)
+    if not jid or is_group:
         return None
     ensure_contact_cache_loaded()
     return CONTACT_NAME_CACHE.get(jid)
@@ -136,9 +148,10 @@ def resolve_contact_name(jid: Optional[str]) -> Optional[str]:
 
 def resolve_chat_name(chat_jid: Optional[str], current_name: Optional[str]) -> Optional[str]:
     """Return a chat name, filling from contacts when missing."""
-    if current_name:
+    if current_name and not is_numeric_name(current_name):
         return current_name
-    return resolve_contact_name(chat_jid) or current_name
+    resolved_contact_name = resolve_contact_name(chat_jid)
+    return resolved_contact_name or current_name
 
 
 def get_sender_name(sender_jid: Optional[str]) -> Optional[str]:
@@ -181,8 +194,8 @@ def get_sender_name(sender_jid: Optional[str]) -> Optional[str]:
 
         return sender_jid
 
-    except sqlite3.Error as e:
-        print(f"Database error while getting sender name: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error while getting sender name", extra={"sender_jid": sender_jid})
         return sender_jid
     finally:
         if 'conn' in locals():
@@ -195,14 +208,14 @@ def resolve_sender_name(sender_jid: Optional[str], chat_jid: Optional[str]) -> O
         return None
 
     sender_name = get_sender_name(sender_jid)
-    if sender_name and sender_name != sender_jid:
-        return sender_name
-
-    if is_group_jid(chat_jid):
+    if sender_name and sender_name != sender_jid and not is_numeric_name(sender_name):
         return sender_name
 
     contact_name = resolve_contact_name(sender_jid)
-    return contact_name or sender_name
+    if contact_name:
+        return contact_name
+
+    return sender_name
 
 
 def format_message(message: Message, show_chat_info: bool = True) -> None:
@@ -222,8 +235,8 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         resolved_sender_name = message.sender_name or resolve_sender_name(message.sender, message.chat_jid) or message.sender
         sender_name = "Me" if message.is_from_me else resolved_sender_name
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    except Exception as e:
-        print(f"Error formatting message: {e}")
+    except Exception:
+        LOGGER.exception("Error formatting message", extra={"message_id": message.id})
     return output
 
 def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
@@ -365,8 +378,8 @@ def list_messages(
 
         return [message_to_dict(message) for message in result]
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in list_messages")
         return []
     finally:
         if 'conn' in locals():
@@ -473,8 +486,8 @@ def get_message_context(
             after=after_messages
         )
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in get_message_context", extra={"message_id": message_id})
         raise
     finally:
         if 'conn' in locals():
@@ -536,7 +549,8 @@ def list_chats(
         result = []
         for chat_data in chats:
             chat_jid = chat_data[0]
-            chat_name = resolve_chat_name(chat_jid, chat_data[1])
+            db_name = chat_data[1]
+            chat_name = resolve_chat_name(chat_jid, db_name)
             last_sender = chat_data[4]
             last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
             chat = Chat(
@@ -552,8 +566,8 @@ def list_chats(
 
         return [chat_to_dict(chat) for chat in result]
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in list_chats")
         return []
     finally:
         if 'conn' in locals():
@@ -594,8 +608,8 @@ def search_contacts(query: str) -> List[Contact]:
             
         return result
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in search_contacts", extra={"query_present": bool(query)})
         return []
     finally:
         if 'conn' in locals():
@@ -650,8 +664,8 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
 
         return [chat_to_dict(chat) for chat in result]
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in get_contact_chats", extra={"jid": jid})
         return []
     finally:
         if 'conn' in locals():
@@ -704,8 +718,8 @@ def get_last_interaction(jid: str) -> str:
         
         return format_message(message)
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in get_last_interaction", extra={"jid": jid})
         return None
     finally:
         if 'conn' in locals():
@@ -759,8 +773,8 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[
 
         return chat_to_dict(chat)
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception("Database error in get_chat", extra={"chat_jid": chat_jid})
         return None
     finally:
         if 'conn' in locals():
@@ -809,12 +823,16 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, A
 
         return chat_to_dict(chat)
         
-    except sqlite3.Error as e:
-        print(f"Database error: {e}")
+    except sqlite3.Error:
+        LOGGER.exception(
+            "Database error in get_direct_chat_by_contact",
+            extra={"sender_phone_number": sender_phone_number},
+        )
         return None
     finally:
         if 'conn' in locals():
             conn.close()
+ 
 
 def send_message(recipient: str, message: str) -> Tuple[bool, str]:
     try:
@@ -834,15 +852,21 @@ def send_message(recipient: str, message: str) -> Tuple[bool, str]:
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+        LOGGER.error(
+            "send_message HTTP error",
+            extra={"recipient": recipient, "status_code": response.status_code},
+        )
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
             
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
+    except requests.RequestException:
+        LOGGER.exception("Request error in send_message", extra={"recipient": recipient})
+        return False, "Request error"
     except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        LOGGER.exception("Response parse error in send_message", extra={"recipient": recipient})
+        return False, "Error parsing response"
+    except Exception:
+        LOGGER.exception("Unexpected error in send_message", extra={"recipient": recipient})
+        return False, "Unexpected error"
 
 def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
     try:
@@ -868,15 +892,21 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+        LOGGER.error(
+            "send_file HTTP error",
+            extra={"recipient": recipient, "status_code": response.status_code},
+        )
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
             
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
+    except requests.RequestException:
+        LOGGER.exception("Request error in send_file", extra={"recipient": recipient})
+        return False, "Request error"
     except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        LOGGER.exception("Response parse error in send_file", extra={"recipient": recipient})
+        return False, "Error parsing response"
+    except Exception:
+        LOGGER.exception("Unexpected error in send_file", extra={"recipient": recipient})
+        return False, "Unexpected error"
 
 def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     try:
@@ -894,6 +924,7 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
             try:
                 media_path = audio.convert_to_opus_ogg_temp(media_path)
             except Exception as e:
+                LOGGER.exception("Audio conversion failed", extra={"recipient": recipient})
                 return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
         
         url = f"{WHATSAPP_API_BASE_URL}/send"
@@ -908,15 +939,21 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
-        else:
-            return False, f"Error: HTTP {response.status_code} - {response.text}"
+        LOGGER.error(
+            "send_audio_message HTTP error",
+            extra={"recipient": recipient, "status_code": response.status_code},
+        )
+        return False, f"Error: HTTP {response.status_code} - {response.text}"
             
-    except requests.RequestException as e:
-        return False, f"Request error: {str(e)}"
+    except requests.RequestException:
+        LOGGER.exception("Request error in send_audio_message", extra={"recipient": recipient})
+        return False, "Request error"
     except json.JSONDecodeError:
-        return False, f"Error parsing response: {response.text}"
-    except Exception as e:
-        return False, f"Unexpected error: {str(e)}"
+        LOGGER.exception("Response parse error in send_audio_message", extra={"recipient": recipient})
+        return False, "Error parsing response"
+    except Exception:
+        LOGGER.exception("Unexpected error in send_audio_message", extra={"recipient": recipient})
+        return False, "Unexpected error"
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
@@ -941,21 +978,28 @@ def download_media(message_id: str, chat_jid: str) -> Optional[str]:
             result = response.json()
             if result.get("success", False):
                 path = result.get("path")
-                print(f"Media downloaded successfully: {path}")
+                LOGGER.info("Media downloaded", extra={"message_id": message_id})
                 return path
-            else:
-                print(f"Download failed: {result.get('message', 'Unknown error')}")
-                return None
-        else:
-            print(f"Error: HTTP {response.status_code} - {response.text}")
+            LOGGER.error(
+                "Download failed",
+                extra={"message_id": message_id},
+            )
             return None
+        LOGGER.error(
+            "Download failed with HTTP error",
+            extra={
+                "message_id": message_id,
+                "status_code": response.status_code,
+            },
+        )
+        return None
             
-    except requests.RequestException as e:
-        print(f"Request error: {str(e)}")
+    except requests.RequestException:
+        LOGGER.exception("Request error in download_media", extra={"message_id": message_id})
         return None
     except json.JSONDecodeError:
-        print(f"Error parsing response: {response.text}")
+        LOGGER.exception("Response parse error in download_media", extra={"message_id": message_id})
         return None
-    except Exception as e:
-        print(f"Unexpected error: {str(e)}")
+    except Exception:
+        LOGGER.exception("Unexpected error in download_media", extra={"message_id": message_id})
         return None

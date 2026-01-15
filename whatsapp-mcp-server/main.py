@@ -1,5 +1,8 @@
 from typing import List, Dict, Any, Optional
+import logging
+
 from fastmcp import FastMCP
+from logging_config import configure_logging
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -15,6 +18,9 @@ from whatsapp import (
     download_media as whatsapp_download_media
 )
 
+configure_logging()
+logger = logging.getLogger("whatsapp-mcp")
+
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
 
@@ -25,7 +31,13 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
     Args:
         query: Search term to match against contact names or phone numbers
     """
-    contacts = whatsapp_search_contacts(query)
+    logger.info("search_contacts request", extra={"query_present": bool(query)})
+    try:
+        contacts = whatsapp_search_contacts(query)
+    except Exception:
+        logger.exception("search_contacts failed", extra={"query_present": bool(query)})
+        raise
+    logger.info("search_contacts result", extra={"count": len(contacts)})
     return contacts
 
 @mcp.tool()
@@ -59,18 +71,36 @@ def list_messages(
         List of message objects with fields: id, chat_jid, chat_name, sender, sender_name, content, timestamp,
         is_from_me, media_type.
     """
-    messages = whatsapp_list_messages(
-        after=after,
-        before=before,
-        sender_phone_number=sender_phone_number,
-        chat_jid=chat_jid,
-        query=query,
-        limit=limit,
-        page=page,
-        include_context=include_context,
-        context_before=context_before,
-        context_after=context_after
+    logger.info(
+        "list_messages request",
+        extra={
+            "after": after,
+            "before": before,
+            "sender_phone_number": sender_phone_number,
+            "chat_jid": chat_jid,
+            "query_present": bool(query),
+            "limit": limit,
+            "page": page,
+            "include_context": include_context,
+        },
     )
+    try:
+        messages = whatsapp_list_messages(
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            query=query,
+            limit=limit,
+            page=page,
+            include_context=include_context,
+            context_before=context_before,
+            context_after=context_after,
+        )
+    except Exception:
+        logger.exception("list_messages failed", extra={"chat_jid": chat_jid})
+        raise
+    logger.info("list_messages result", extra={"count": len(messages)})
     return messages
 
 @mcp.tool()
@@ -94,13 +124,28 @@ def list_chats(
         List of chat objects with fields: jid, name, last_message_time, last_message, last_sender,
         last_sender_name, last_is_from_me.
     """
-    chats = whatsapp_list_chats(
-        query=query,
-        limit=limit,
-        page=page,
-        include_last_message=include_last_message,
-        sort_by=sort_by
+    logger.info(
+        "list_chats request",
+        extra={
+            "query_present": bool(query),
+            "limit": limit,
+            "page": page,
+            "include_last_message": include_last_message,
+            "sort_by": sort_by,
+        },
     )
+    try:
+        chats = whatsapp_list_chats(
+            query=query,
+            limit=limit,
+            page=page,
+            include_last_message=include_last_message,
+            sort_by=sort_by,
+        )
+    except Exception:
+        logger.exception("list_chats failed", extra={"query_present": bool(query)})
+        raise
+    logger.info("list_chats result", extra={"count": len(chats)})
     return chats
 
 @mcp.tool()
@@ -111,7 +156,16 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]
         chat_jid: The JID of the chat to retrieve
         include_last_message: Whether to include the last message (default True)
     """
-    chat = whatsapp_get_chat(chat_jid, include_last_message)
+    logger.info("get_chat request", extra={"chat_jid": chat_jid, "include_last_message": include_last_message})
+    try:
+        chat = whatsapp_get_chat(chat_jid, include_last_message)
+    except Exception:
+        logger.exception("get_chat failed", extra={"chat_jid": chat_jid})
+        raise
+    if not chat:
+        logger.warning("get_chat missing", extra={"chat_jid": chat_jid})
+    else:
+        logger.info("get_chat result", extra={"chat_jid": chat_jid})
     return chat
 
 @mcp.tool()
@@ -121,7 +175,16 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
     Args:
         sender_phone_number: The phone number to search for
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
+    logger.info("get_direct_chat_by_contact request", extra={"sender_phone_number": sender_phone_number})
+    try:
+        chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
+    except Exception:
+        logger.exception("get_direct_chat_by_contact failed", extra={"sender_phone_number": sender_phone_number})
+        raise
+    if not chat:
+        logger.warning("get_direct_chat_by_contact missing", extra={"sender_phone_number": sender_phone_number})
+    else:
+        logger.info("get_direct_chat_by_contact result", extra={"sender_phone_number": sender_phone_number})
     return chat
 
 @mcp.tool()
@@ -133,7 +196,13 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
         limit: Maximum number of chats to return (default 20)
         page: Page number for pagination (default 0)
     """
-    chats = whatsapp_get_contact_chats(jid, limit, page)
+    logger.info("get_contact_chats request", extra={"jid": jid, "limit": limit, "page": page})
+    try:
+        chats = whatsapp_get_contact_chats(jid, limit, page)
+    except Exception:
+        logger.exception("get_contact_chats failed", extra={"jid": jid})
+        raise
+    logger.info("get_contact_chats result", extra={"count": len(chats), "jid": jid})
     return chats
 
 @mcp.tool()
@@ -143,7 +212,16 @@ def get_last_interaction(jid: str) -> str:
     Args:
         jid: The JID of the contact to search for
     """
-    message = whatsapp_get_last_interaction(jid)
+    logger.info("get_last_interaction request", extra={"jid": jid})
+    try:
+        message = whatsapp_get_last_interaction(jid)
+    except Exception:
+        logger.exception("get_last_interaction failed", extra={"jid": jid})
+        raise
+    if not message:
+        logger.warning("get_last_interaction missing", extra={"jid": jid})
+    else:
+        logger.info("get_last_interaction result", extra={"jid": jid})
     return message
 
 @mcp.tool()
@@ -159,7 +237,16 @@ def get_message_context(
         before: Number of messages to include before the target message (default 5)
         after: Number of messages to include after the target message (default 5)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
+    logger.info("get_message_context request", extra={"message_id": message_id, "before": before, "after": after})
+    try:
+        context = whatsapp_get_message_context(message_id, before, after)
+    except ValueError:
+        logger.warning("get_message_context missing", extra={"message_id": message_id}, exc_info=True)
+        raise
+    except Exception:
+        logger.exception("get_message_context failed", extra={"message_id": message_id})
+        raise
+    logger.info("get_message_context result", extra={"message_id": message_id})
     return context
 
 @mcp.tool()
@@ -177,15 +264,22 @@ def send_message(
     Returns:
         A dictionary containing success status and a status message
     """
+    logger.info("send_message request", extra={"recipient": recipient})
     # Validate input
     if not recipient:
+        logger.error("send_message missing recipient")
         return {
             "success": False,
             "message": "Recipient must be provided"
         }
     
-    # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
+    try:
+        # Call the whatsapp_send_message function with the unified recipient parameter
+        success, status_message = whatsapp_send_message(recipient, message)
+    except Exception:
+        logger.exception("send_message failed", extra={"recipient": recipient})
+        raise
+    logger.info("send_message result", extra={"recipient": recipient, "success": success})
     return {
         "success": success,
         "message": status_message
@@ -204,8 +298,14 @@ def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
         A dictionary containing success status and a status message
     """
     
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
+    logger.info("send_file request", extra={"recipient": recipient})
+    try:
+        # Call the whatsapp_send_file function
+        success, status_message = whatsapp_send_file(recipient, media_path)
+    except Exception:
+        logger.exception("send_file failed", extra={"recipient": recipient})
+        raise
+    logger.info("send_file result", extra={"recipient": recipient, "success": success})
     return {
         "success": success,
         "message": status_message
@@ -223,7 +323,13 @@ def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing success status and a status message
     """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    logger.info("send_audio_message request", extra={"recipient": recipient})
+    try:
+        success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+    except Exception:
+        logger.exception("send_audio_message failed", extra={"recipient": recipient})
+        raise
+    logger.info("send_audio_message result", extra={"recipient": recipient, "success": success})
     return {
         "success": success,
         "message": status_message
@@ -240,19 +346,25 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
     Returns:
         A dictionary containing success status, a status message, and the file path if successful
     """
-    file_path = whatsapp_download_media(message_id, chat_jid)
+    logger.info("download_media request", extra={"message_id": message_id, "chat_jid": chat_jid})
+    try:
+        file_path = whatsapp_download_media(message_id, chat_jid)
+    except Exception:
+        logger.exception("download_media failed", extra={"message_id": message_id, "chat_jid": chat_jid})
+        raise
     
     if file_path:
+        logger.info("download_media result", extra={"message_id": message_id})
         return {
             "success": True,
             "message": "Media downloaded successfully",
             "file_path": file_path
         }
-    else:
-        return {
-            "success": False,
-            "message": "Failed to download media"
-        }
+    logger.error("download_media failed", extra={"message_id": message_id, "chat_jid": chat_jid})
+    return {
+        "success": False,
+        "message": "Failed to download media"
+    }
 
 if __name__ == "__main__":
     # Initialize and run the server
