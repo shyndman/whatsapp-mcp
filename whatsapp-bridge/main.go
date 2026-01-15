@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,13 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+const (
+	historySyncCountEnvVar  = "WHATSAPP_HISTORY_SYNC_COUNT"
+	defaultHistorySyncCount = 1000
+)
+
+var historySyncCount = defaultHistorySyncCount
 
 // Message represents a chat message for our client
 type Message struct {
@@ -786,10 +794,32 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	}()
 }
 
+func getHistorySyncCount() (int, error) {
+	value := strings.TrimSpace(os.Getenv(historySyncCountEnvVar))
+	if value == "" {
+		return defaultHistorySyncCount, nil
+	}
+
+	count, err := strconv.Atoi(value)
+	if err != nil || count <= 0 {
+		return 0, fmt.Errorf("invalid %s: %q (must be positive integer)", historySyncCountEnvVar, value)
+	}
+
+	return count, nil
+}
+
 func main() {
 	// Set up logger
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
+
+	historySyncCountValue, err := getHistorySyncCount()
+	if err != nil {
+		logger.Errorf("Failed to read history sync count: %v", err)
+		return
+	}
+	historySyncCount = historySyncCountValue
+	logger.Infof("History sync message count set to %d", historySyncCount)
 
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
@@ -1165,7 +1195,7 @@ func requestHistorySync(client *whatsmeow.Client) {
 	}
 
 	// Build and send a history sync request
-	historyMsg := client.BuildHistorySyncRequest(nil, 100)
+	historyMsg := client.BuildHistorySyncRequest(nil, historySyncCount)
 	if historyMsg == nil {
 		fmt.Println("Failed to build history sync request.")
 		return

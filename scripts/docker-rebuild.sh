@@ -14,10 +14,11 @@ docker rm -f whatsapp-mcp 2>/dev/null || true
 
 echo "Starting new container..."
 docker run -d \
-  --name whatsapp-mcp \
-  -p 8000:8000 \
-  -v "$PROJECT_ROOT/tmp/store:/app/whatsapp-bridge/store" \
-  whatsapp-mcp
+	--name whatsapp-mcp \
+	-p 8000:8000 \
+	-e WHATSAPP_HISTORY_SYNC_COUNT=10000 \
+	-v "$PROJECT_ROOT/tmp/store:/app/whatsapp-bridge/store" \
+	whatsapp-mcp
 
 echo "Done! Container 'whatsapp-mcp' is running."
 echo "Port 8000 exposed, store mounted at tmp/store"

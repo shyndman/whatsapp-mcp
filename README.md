@@ -174,6 +174,11 @@ Claude can access the following tools to interact with WhatsApp:
 - **send_audio_message**: Send an audio file as a WhatsApp voice message (requires the file to be an .ogg opus file or ffmpeg must be installed)
 - **download_media**: Download media from a WhatsApp message and get the local file path
 
+#### Environment Variables
+
+- `WHATSAPP_HISTORY_SYNC_COUNT`: Number of messages requested per on-demand history sync in the bridge (default: 1000). Must be a positive integer.
+  Example: `WHATSAPP_HISTORY_SYNC_COUNT=500`.
+
 ### Media Handling Features
 
 The MCP server supports both sending and receiving various media types:
