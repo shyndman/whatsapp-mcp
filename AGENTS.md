@@ -28,10 +28,11 @@ written for coding agents working on the WhatsApp MCP server and bridge.
 
 ### Python (whatsapp-mcp-server)
 
+- Prefer `uv run` for all Python commands in this repo.
 - Run the MCP server (per README):
   - `cd whatsapp-mcp-server`
   - `uv run main.py`
-- Alternative direct run if `uv` isn’t used locally:
+- Alternative direct run if `uv` isn’t available locally:
   - `cd whatsapp-mcp-server`
   - `python main.py`
 - Tests:
