@@ -8,7 +8,11 @@ import json
 import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
+WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
 WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
+CONTACT_NAME_PRIORITY = ("full_name", "business_name", "first_name", "push_name")
+CONTACT_NAME_CACHE: Dict[str, str] = {}
+CONTACT_CACHE_LOADED = False
 
 @dataclass
 class Message:
@@ -48,6 +52,94 @@ class MessageContext:
     message: Message
     before: List[Message]
     after: List[Message]
+
+
+def normalize_contact_value(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    trimmed = value.strip()
+    return trimmed if trimmed else None
+
+
+def select_contact_display_name(contact: Dict[str, Optional[str]]) -> Optional[str]:
+    """Choose the highest-priority contact name."""
+    for field in CONTACT_NAME_PRIORITY:
+        value = normalize_contact_value(contact.get(field))
+        if value:
+            return value
+    return None
+
+
+def is_group_jid(jid: Optional[str]) -> bool:
+    return bool(jid) and jid.endswith("@g.us")
+
+
+def is_device_authenticated() -> bool:
+    """Return True when the WhatsApp store has a device row."""
+    try:
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM whatsmeow_device LIMIT 1")
+        return cursor.fetchone() is not None
+    except sqlite3.Error as e:
+        print(f"Database error while checking device authentication: {e}")
+        return False
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def ensure_contact_cache_loaded() -> None:
+    """Load contacts into memory on first authenticated request."""
+    global CONTACT_NAME_CACHE, CONTACT_CACHE_LOADED
+    if CONTACT_CACHE_LOADED:
+        return
+    if not is_device_authenticated():
+        return
+    try:
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT their_jid, full_name, business_name, first_name, push_name
+            FROM whatsmeow_contacts
+        """)
+        contacts = cursor.fetchall()
+        cache: Dict[str, str] = {}
+        for contact_data in contacts:
+            contact = {
+                "their_jid": contact_data[0],
+                "full_name": contact_data[1],
+                "business_name": contact_data[2],
+                "first_name": contact_data[3],
+                "push_name": contact_data[4],
+            }
+            display_name = select_contact_display_name(contact)
+            contact_jid = contact["their_jid"]
+            if contact_jid and display_name:
+                cache[contact_jid] = display_name
+        CONTACT_NAME_CACHE = cache
+        CONTACT_CACHE_LOADED = True
+    except sqlite3.Error as e:
+        print(f"Database error while loading contacts: {e}")
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def resolve_contact_name(jid: Optional[str]) -> Optional[str]:
+    """Return a cached contact name for a full JID."""
+    if not jid or is_group_jid(jid):
+        return None
+    ensure_contact_cache_loaded()
+    return CONTACT_NAME_CACHE.get(jid)
+
+
+def resolve_chat_name(chat_jid: Optional[str], current_name: Optional[str]) -> Optional[str]:
+    """Return a chat name, filling from contacts when missing."""
+    if current_name:
+        return current_name
+    return resolve_contact_name(chat_jid) or current_name
+
 
 def get_sender_name(sender_jid: Optional[str]) -> Optional[str]:
     if not sender_jid:
@@ -96,6 +188,23 @@ def get_sender_name(sender_jid: Optional[str]) -> Optional[str]:
         if 'conn' in locals():
             conn.close()
 
+
+def resolve_sender_name(sender_jid: Optional[str], chat_jid: Optional[str]) -> Optional[str]:
+    """Return a sender name, using cached contacts for direct chats."""
+    if not sender_jid:
+        return None
+
+    sender_name = get_sender_name(sender_jid)
+    if sender_name and sender_name != sender_jid:
+        return sender_name
+
+    if is_group_jid(chat_jid):
+        return sender_name
+
+    contact_name = resolve_contact_name(sender_jid)
+    return contact_name or sender_name
+
+
 def format_message(message: Message, show_chat_info: bool = True) -> None:
     """Print a single message with consistent formatting."""
     output = ""
@@ -110,7 +219,8 @@ def format_message(message: Message, show_chat_info: bool = True) -> None:
         content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
     
     try:
-        sender_name = "Me" if message.is_from_me else (message.sender_name or get_sender_name(message.sender) or message.sender)
+        resolved_sender_name = message.sender_name or resolve_sender_name(message.sender, message.chat_jid) or message.sender
+        sender_name = "Me" if message.is_from_me else resolved_sender_name
         output += f"From: {sender_name}: {content_prefix}{message.content}\n"
     except Exception as e:
         print(f"Error formatting message: {e}")
@@ -226,15 +336,17 @@ def list_messages(
         result = []
         for msg in messages:
             sender = msg[1]
-            sender_name = get_sender_name(sender) or sender
+            chat_jid = msg[5]
+            chat_name = resolve_chat_name(chat_jid, msg[2])
+            sender_name = resolve_sender_name(sender, chat_jid) or sender
             message = Message(
                 timestamp=datetime.fromisoformat(msg[0]),
                 sender=sender,
                 sender_name=sender_name,
-                chat_name=msg[2],
+                chat_name=chat_name,
                 content=msg[3],
                 is_from_me=msg[4],
-                chat_jid=msg[5],
+                chat_jid=chat_jid,
                 id=msg[6],
                 media_type=msg[7]
             )
@@ -284,15 +396,17 @@ def get_message_context(
             raise ValueError(f"Message with ID {message_id} not found")
             
         sender = msg_data[1]
-        sender_name = get_sender_name(sender) or sender
+        chat_jid = msg_data[5]
+        chat_name = resolve_chat_name(chat_jid, msg_data[2])
+        sender_name = resolve_sender_name(sender, chat_jid) or sender
         target_message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
             sender=sender,
             sender_name=sender_name,
-            chat_name=msg_data[2],
+            chat_name=chat_name,
             content=msg_data[3],
             is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
+            chat_jid=chat_jid,
             id=msg_data[6],
             media_type=msg_data[8]
         )
@@ -310,15 +424,17 @@ def get_message_context(
         before_messages = []
         for msg in cursor.fetchall():
             sender = msg[1]
-            sender_name = get_sender_name(sender) or sender
+            chat_jid = msg[5]
+            chat_name = resolve_chat_name(chat_jid, msg[2])
+            sender_name = resolve_sender_name(sender, chat_jid) or sender
             before_messages.append(Message(
                 timestamp=datetime.fromisoformat(msg[0]),
                 sender=sender,
                 sender_name=sender_name,
-                chat_name=msg[2],
+                chat_name=chat_name,
                 content=msg[3],
                 is_from_me=msg[4],
-                chat_jid=msg[5],
+                chat_jid=chat_jid,
                 id=msg[6],
                 media_type=msg[7]
             ))
@@ -336,15 +452,17 @@ def get_message_context(
         after_messages = []
         for msg in cursor.fetchall():
             sender = msg[1]
-            sender_name = get_sender_name(sender) or sender
+            chat_jid = msg[5]
+            chat_name = resolve_chat_name(chat_jid, msg[2])
+            sender_name = resolve_sender_name(sender, chat_jid) or sender
             after_messages.append(Message(
                 timestamp=datetime.fromisoformat(msg[0]),
                 sender=sender,
                 sender_name=sender_name,
-                chat_name=msg[2],
+                chat_name=chat_name,
                 content=msg[3],
                 is_from_me=msg[4],
-                chat_jid=msg[5],
+                chat_jid=chat_jid,
                 id=msg[6],
                 media_type=msg[7]
             ))
@@ -417,13 +535,17 @@ def list_chats(
 
         result = []
         for chat_data in chats:
+            chat_jid = chat_data[0]
+            chat_name = resolve_chat_name(chat_jid, chat_data[1])
+            last_sender = chat_data[4]
+            last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
             chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
+                jid=chat_jid,
+                name=chat_name,
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_sender_name=get_sender_name(chat_data[4]) if chat_data[4] else None,
+                last_sender=last_sender,
+                last_sender_name=last_sender_name,
                 last_is_from_me=chat_data[5]
             )
             result.append(chat)
@@ -511,13 +633,17 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
         
         result = []
         for chat_data in chats:
+            chat_jid = chat_data[0]
+            chat_name = resolve_chat_name(chat_jid, chat_data[1])
+            last_sender = chat_data[4]
+            last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
             chat = Chat(
-                jid=chat_data[0],
-                name=chat_data[1],
+                jid=chat_jid,
+                name=chat_name,
                 last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
                 last_message=chat_data[3],
-                last_sender=chat_data[4],
-                last_sender_name=get_sender_name(chat_data[4]) if chat_data[4] else None,
+                last_sender=last_sender,
+                last_sender_name=last_sender_name,
                 last_is_from_me=chat_data[5]
             )
             result.append(chat)
@@ -561,15 +687,17 @@ def get_last_interaction(jid: str) -> str:
             return None
             
         sender = msg_data[1]
-        sender_name = get_sender_name(sender) or sender
+        chat_jid = msg_data[5]
+        chat_name = resolve_chat_name(chat_jid, msg_data[2])
+        sender_name = resolve_sender_name(sender, chat_jid) or sender
         message = Message(
             timestamp=datetime.fromisoformat(msg_data[0]),
             sender=sender,
             sender_name=sender_name,
-            chat_name=msg_data[2],
+            chat_name=chat_name,
             content=msg_data[3],
             is_from_me=msg_data[4],
-            chat_jid=msg_data[5],
+            chat_jid=chat_jid,
             id=msg_data[6],
             media_type=msg_data[7]
         )
@@ -615,13 +743,17 @@ def get_chat(chat_jid: str, include_last_message: bool = True) -> Optional[Dict[
         if not chat_data:
             return None
 
+        chat_jid = chat_data[0]
+        chat_name = resolve_chat_name(chat_jid, chat_data[1])
+        last_sender = chat_data[4]
+        last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
         chat = Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
+            jid=chat_jid,
+            name=chat_name,
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_sender_name=get_sender_name(chat_data[4]) if chat_data[4] else None,
+            last_sender=last_sender,
+            last_sender_name=last_sender_name,
             last_is_from_me=chat_data[5]
         )
 
@@ -661,13 +793,17 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, A
         if not chat_data:
             return None
             
+        chat_jid = chat_data[0]
+        chat_name = resolve_chat_name(chat_jid, chat_data[1])
+        last_sender = chat_data[4]
+        last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
         chat = Chat(
-            jid=chat_data[0],
-            name=chat_data[1],
+            jid=chat_jid,
+            name=chat_name,
             last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
             last_message=chat_data[3],
-            last_sender=chat_data[4],
-            last_sender_name=get_sender_name(chat_data[4]) if chat_data[4] else None,
+            last_sender=last_sender,
+            last_sender_name=last_sender_name,
             last_is_from_me=chat_data[5]
         )
 
