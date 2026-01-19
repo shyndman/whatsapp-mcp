@@ -1,11 +1,14 @@
-import sqlite3
-from datetime import datetime
-from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict, Any
-import os.path
-import logging
-import requests
+import base64
+import binascii
 import json
+import logging
+import os.path
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional, List, Tuple, Dict, Any
+
+import requests
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
@@ -13,6 +16,12 @@ WHATSAPP_API_BASE_URL = "http://localhost:8080/api"
 CONTACT_NAME_PRIORITY = ("full_name", "business_name", "first_name", "push_name")
 CONTACT_NAME_CACHE: Dict[str, str] = {}
 CONTACT_CACHE_LOADED = False
+PARTITION_DEFAULT_SIZE = 1000
+CURSOR_TIMESTAMP_KEY = "ts"
+CURSOR_ID_KEY = "id"
+CURSOR_ERROR_MESSAGE = "Invalid cursor: expected base64-url encoded JSON with 'ts' and 'id'."
+PARTITION_SIZE_ERROR_MESSAGE = "partition_size must be a positive integer."
+MESSAGE_ORDER_BY = "messages.timestamp DESC, messages.id DESC"
 LOGGER = logging.getLogger("whatsapp-mcp")
 
 @dataclass
@@ -301,6 +310,36 @@ def chat_to_dict(chat: Chat) -> Dict[str, Any]:
     }
 
 
+def encode_cursor(timestamp: datetime, message_id: str) -> str:
+    payload = {
+        CURSOR_TIMESTAMP_KEY: timestamp.isoformat(),
+        CURSOR_ID_KEY: message_id,
+    }
+    encoded = json.dumps(payload).encode("utf-8")
+    return base64.urlsafe_b64encode(encoded).decode("utf-8")
+
+
+def decode_cursor(cursor: str) -> Tuple[datetime, str]:
+    if not cursor:
+        raise ValueError(CURSOR_ERROR_MESSAGE)
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("utf-8"))
+        payload = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError, ValueError, TypeError):
+        raise ValueError(CURSOR_ERROR_MESSAGE)
+    if not isinstance(payload, dict):
+        raise ValueError(CURSOR_ERROR_MESSAGE)
+    timestamp_value = payload.get(CURSOR_TIMESTAMP_KEY)
+    message_id = payload.get(CURSOR_ID_KEY)
+    if not isinstance(timestamp_value, str) or not isinstance(message_id, str):
+        raise ValueError(CURSOR_ERROR_MESSAGE)
+    try:
+        timestamp = datetime.fromisoformat(timestamp_value)
+    except ValueError:
+        raise ValueError(CURSOR_ERROR_MESSAGE)
+    return timestamp, message_id
+
+
 def list_messages(
     message_id: Optional[str] = None,
     after: Optional[str] = None,
@@ -308,6 +347,8 @@ def list_messages(
     sender_phone_number: Optional[str] = None,
     chat_jid: Optional[str] = None,
     query: Optional[str] = None,
+    cursor: Optional[str] = None,
+    snapshot_at: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
     include_context: bool = True,
@@ -333,63 +374,81 @@ def list_messages(
 
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
+        db_cursor = conn.cursor()
+
         # Build base query
         query_parts = ["SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type FROM messages"]
         query_parts.append("JOIN chats ON messages.chat_jid = chats.jid")
         where_clauses = []
         params = []
-        
+
         # Add filters
         if after:
             try:
-                after = datetime.fromisoformat(after)
+                after_value = datetime.fromisoformat(after)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
-            
+
             where_clauses.append("messages.timestamp > ?")
-            params.append(after)
+            params.append(after_value)
 
         if before:
             try:
-                before = datetime.fromisoformat(before)
+                before_value = datetime.fromisoformat(before)
             except ValueError:
                 raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
-            
+
             where_clauses.append("messages.timestamp < ?")
-            params.append(before)
+            params.append(before_value)
 
         if sender_phone_number:
             where_clauses.append("messages.sender = ?")
             params.append(sender_phone_number)
-            
+
         if chat_jid:
             where_clauses.append("messages.chat_jid = ?")
             params.append(chat_jid)
-            
+
         if query:
             where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
             params.append(f"%{query}%")
-            
+
+        snapshot_at_value = None
+        if snapshot_at:
+            try:
+                snapshot_at_value = datetime.fromisoformat(snapshot_at)
+            except ValueError:
+                raise ValueError(
+                    f"Invalid date format for 'snapshot_at': {snapshot_at}. Please use ISO-8601 format."
+                )
+            where_clauses.append("messages.timestamp <= ?")
+            params.append(snapshot_at_value)
+
+        if cursor:
+            cursor_timestamp, cursor_message_id = decode_cursor(cursor)
+            where_clauses.append("(messages.timestamp < ? OR (messages.timestamp = ? AND messages.id < ?))")
+            params.extend([cursor_timestamp, cursor_timestamp, cursor_message_id])
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
-        # Add pagination
-        offset = page * limit
-        query_parts.append("ORDER BY messages.timestamp DESC")
-        query_parts.append("LIMIT ? OFFSET ?")
-        params.extend([limit, offset])
-        
-        cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
-        
+
+        query_parts.append(f"ORDER BY {MESSAGE_ORDER_BY}")
+        query_parts.append("LIMIT ?")
+        params.append(limit)
+        if not cursor:
+            offset = page * limit
+            query_parts.append("OFFSET ?")
+            params.append(offset)
+
+        db_cursor.execute(" ".join(query_parts), tuple(params))
+        messages = db_cursor.fetchall()
+
         result = []
         for msg in messages:
             sender = msg[1]
-            chat_jid = msg[5]
-            chat_name = resolve_chat_name(chat_jid, msg[2])
-            sender_name = resolve_sender_name(sender, chat_jid) or sender
+            message_chat_jid = msg[5]
+            chat_name = resolve_chat_name(message_chat_jid, msg[2])
+            sender_name = resolve_sender_name(sender, message_chat_jid) or sender
             message = Message(
                 timestamp=datetime.fromisoformat(msg[0]),
                 sender=sender,
@@ -397,7 +456,7 @@ def list_messages(
                 chat_name=chat_name,
                 content=msg[3],
                 is_from_me=msg[4],
-                chat_jid=chat_jid,
+                chat_jid=message_chat_jid,
                 id=msg[6],
                 media_type=msg[7]
             )
@@ -407,7 +466,7 @@ def list_messages(
             # Add context for each message
             messages_with_context = []
             for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
+                context = get_message_context(msg.id, context_before, context_after, snapshot_at_value)
                 messages_with_context.extend(context.before)
                 messages_with_context.append(context.message)
                 messages_with_context.extend(context.after)
@@ -415,7 +474,7 @@ def list_messages(
             return [message_to_dict(message) for message in messages_with_context]
 
         return [message_to_dict(message) for message in result]
-        
+
     except sqlite3.Error:
         LOGGER.exception("Database error in list_messages")
         return []
@@ -424,28 +483,175 @@ def list_messages(
             conn.close()
 
 
+def partition_messages(
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    sender_phone_number: Optional[str] = None,
+    chat_jid: Optional[str] = None,
+    query: Optional[str] = None,
+    include_context: bool = True,
+    partition_size: int = PARTITION_DEFAULT_SIZE
+) -> Dict[str, Any]:
+    """Plan deterministic partitions for message listings."""
+    if not isinstance(partition_size, int) or partition_size < 1:
+        raise ValueError(PARTITION_SIZE_ERROR_MESSAGE)
+
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        db_cursor = conn.cursor()
+
+        where_clauses = []
+        params = []
+
+        if after:
+            try:
+                after_value = datetime.fromisoformat(after)
+            except ValueError:
+                raise ValueError(f"Invalid date format for 'after': {after}. Please use ISO-8601 format.")
+            where_clauses.append("messages.timestamp > ?")
+            params.append(after_value)
+
+        if before:
+            try:
+                before_value = datetime.fromisoformat(before)
+            except ValueError:
+                raise ValueError(f"Invalid date format for 'before': {before}. Please use ISO-8601 format.")
+            where_clauses.append("messages.timestamp < ?")
+            params.append(before_value)
+
+        if sender_phone_number:
+            where_clauses.append("messages.sender = ?")
+            params.append(sender_phone_number)
+
+        if chat_jid:
+            where_clauses.append("messages.chat_jid = ?")
+            params.append(chat_jid)
+
+        if query:
+            where_clauses.append("LOWER(messages.content) LIKE LOWER(?)")
+            params.append(f"%{query}%")
+
+        snapshot_query = "SELECT MAX(messages.timestamp) FROM messages"
+        if where_clauses:
+            snapshot_query += " WHERE " + " AND ".join(where_clauses)
+        db_cursor.execute(snapshot_query, tuple(params))
+        snapshot_row = db_cursor.fetchone()
+        if not snapshot_row or snapshot_row[0] is None:
+            return {
+                "total_count": 0,
+                "snapshot_at": None,
+                "partitions": [],
+            }
+
+        snapshot_value = snapshot_row[0]
+        snapshot_at_value = (
+            datetime.fromisoformat(snapshot_value)
+            if isinstance(snapshot_value, str)
+            else snapshot_value
+        )
+        snapshot_at_output = snapshot_at_value.isoformat()
+
+        count_clauses = list(where_clauses)
+        count_params = list(params)
+        count_clauses.append("messages.timestamp <= ?")
+        count_params.append(snapshot_at_value)
+        count_query = "SELECT COUNT(1) FROM messages"
+        if count_clauses:
+            count_query += " WHERE " + " AND ".join(count_clauses)
+        db_cursor.execute(count_query, tuple(count_params))
+        count_row = db_cursor.fetchone()
+        total_count = count_row[0] if count_row else 0
+
+        partitions = []
+        current_cursor = None
+        while True:
+            partition_clauses = list(where_clauses)
+            partition_params = list(params)
+            partition_clauses.append("messages.timestamp <= ?")
+            partition_params.append(snapshot_at_value)
+            if current_cursor:
+                cursor_timestamp, cursor_message_id = decode_cursor(current_cursor)
+                partition_clauses.append(
+                    "(messages.timestamp < ? OR (messages.timestamp = ? AND messages.id < ?))"
+                )
+                partition_params.extend([cursor_timestamp, cursor_timestamp, cursor_message_id])
+
+            partition_query = "SELECT messages.timestamp, messages.id FROM messages"
+            if partition_clauses:
+                partition_query += " WHERE " + " AND ".join(partition_clauses)
+            partition_query += f" ORDER BY {MESSAGE_ORDER_BY} LIMIT ?"
+            partition_params.append(partition_size)
+
+            db_cursor.execute(partition_query, tuple(partition_params))
+            rows = db_cursor.fetchall()
+            if not rows:
+                break
+
+            last_row = rows[-1]
+            last_timestamp_value = last_row[0]
+            last_timestamp = (
+                datetime.fromisoformat(last_timestamp_value)
+                if isinstance(last_timestamp_value, str)
+                else last_timestamp_value
+            )
+            partition_limit = len(rows)
+            partitions.append({
+                "after": after,
+                "before": before,
+                "sender_phone_number": sender_phone_number,
+                "chat_jid": chat_jid,
+                "query": query,
+                "include_context": include_context,
+                "limit": partition_limit,
+                "cursor": current_cursor,
+                "snapshot_at": snapshot_at_output,
+            })
+
+            current_cursor = encode_cursor(last_timestamp, last_row[1])
+            if partition_limit < partition_size:
+                break
+
+        return {
+            "total_count": total_count,
+            "snapshot_at": snapshot_at_output,
+            "partitions": partitions,
+        }
+
+    except sqlite3.Error:
+        LOGGER.exception("Database error in partition_messages")
+        return {
+            "total_count": 0,
+            "snapshot_at": None,
+            "partitions": [],
+        }
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
 def get_message_context(
     message_id: str,
     before: int = 5,
-    after: int = 5
+    after: int = 5,
+    snapshot_at: Optional[datetime] = None
 ) -> MessageContext:
     """Get context around a specific message."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
+        db_cursor = conn.cursor()
+
         # Get the target message first
-        cursor.execute("""
+        db_cursor.execute("""
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.chat_jid, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.id = ?
         """, (message_id,))
-        msg_data = cursor.fetchone()
-        
+        msg_data = db_cursor.fetchone()
+
         if not msg_data:
             raise ValueError(f"Message with ID {message_id} not found")
-            
+
         sender = msg_data[1]
         chat_jid = msg_data[5]
         chat_name = resolve_chat_name(chat_jid, msg_data[2])
@@ -461,19 +667,24 @@ def get_message_context(
             id=msg_data[6],
             media_type=msg_data[8]
         )
-        
+
         # Get messages before
-        cursor.execute("""
+        before_query = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp < ?
-            ORDER BY messages.timestamp DESC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], before))
-        
+        """
+        before_params = [msg_data[7], msg_data[0]]
+        if snapshot_at:
+            before_query += " AND messages.timestamp <= ?"
+            before_params.append(snapshot_at)
+        before_query += " ORDER BY messages.timestamp DESC LIMIT ?"
+        before_params.append(before)
+        db_cursor.execute(before_query, tuple(before_params))
+
         before_messages = []
-        for msg in cursor.fetchall():
+        for msg in db_cursor.fetchall():
             sender = msg[1]
             chat_jid = msg[5]
             chat_name = resolve_chat_name(chat_jid, msg[2])
@@ -489,19 +700,24 @@ def get_message_context(
                 id=msg[6],
                 media_type=msg[7]
             ))
-        
+
         # Get messages after
-        cursor.execute("""
+        after_query = """
             SELECT messages.timestamp, messages.sender, chats.name, messages.content, messages.is_from_me, chats.jid, messages.id, messages.media_type
             FROM messages
             JOIN chats ON messages.chat_jid = chats.jid
             WHERE messages.chat_jid = ? AND messages.timestamp > ?
-            ORDER BY messages.timestamp ASC
-            LIMIT ?
-        """, (msg_data[7], msg_data[0], after))
-        
+        """
+        after_params = [msg_data[7], msg_data[0]]
+        if snapshot_at:
+            after_query += " AND messages.timestamp <= ?"
+            after_params.append(snapshot_at)
+        after_query += " ORDER BY messages.timestamp ASC LIMIT ?"
+        after_params.append(after)
+        db_cursor.execute(after_query, tuple(after_params))
+
         after_messages = []
-        for msg in cursor.fetchall():
+        for msg in db_cursor.fetchall():
             sender = msg[1]
             chat_jid = msg[5]
             chat_name = resolve_chat_name(chat_jid, msg[2])
@@ -517,13 +733,13 @@ def get_message_context(
                 id=msg[6],
                 media_type=msg[7]
             ))
-        
+
         return MessageContext(
             message=target_message,
             before=before_messages,
             after=after_messages
         )
-        
+
     except sqlite3.Error:
         LOGGER.exception("Database error in get_message_context", extra={"message_id": message_id})
         raise

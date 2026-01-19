@@ -45,6 +45,8 @@ const (
 	videoFileExtension           = ".mp4"
 	audioFileExtension           = ".ogg"
 	defaultDocumentFileExtension = ".bin"
+
+	messagesChatTimeIDIndexSQL = "CREATE INDEX IF NOT EXISTS messages_chat_time_id ON messages(chat_jid, timestamp, id)"
 )
 
 var historySyncCount = defaultHistorySyncCount
@@ -106,6 +108,12 @@ func NewMessageStore() (*MessageStore, error) {
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %v", err)
+	}
+
+	_, err = db.Exec(messagesChatTimeIDIndexSQL)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create message index: %v", err)
 	}
 
 	return &MessageStore{db: db}, nil

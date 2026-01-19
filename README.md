@@ -162,7 +162,8 @@ Once connected, you can interact with your WhatsApp contacts through Claude, lev
 Claude can access the following tools to interact with WhatsApp:
 
 - **search_contacts**: Search for contacts by name or phone number
-- **list_messages**: Retrieve messages with optional filters and context
+- **list_messages**: Retrieve messages with optional filters, cursor paging, snapshot bounds, and context
+- **partition_messages**: Plan deterministic cursor-based partitions for `list_messages` to run agents in parallel
 - **list_chats**: List available chats with metadata (optionally filter by `contact_jid`)
 - **get_chat**: Get information about a specific chat
 - **get_direct_chat_by_contact**: Find a direct chat with a specific contact

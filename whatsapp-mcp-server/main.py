@@ -6,6 +6,7 @@ from logging_config import configure_logging
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
+    partition_messages as whatsapp_partition_messages,
     list_chats as whatsapp_list_chats,
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
@@ -15,6 +16,8 @@ from whatsapp import (
 
 configure_logging()
 logger = logging.getLogger("whatsapp-mcp")
+
+DEFAULT_PARTITION_SIZE = 1000
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -43,6 +46,8 @@ def list_messages(
     sender_phone_number: Optional[str] = None,
     chat_jid: Optional[str] = None,
     query: Optional[str] = None,
+    cursor: Optional[str] = None,
+    snapshot_at: Optional[str] = None,
     limit: int = 20,
     page: int = 0,
     include_context: bool = True,
@@ -58,8 +63,10 @@ def list_messages(
         sender_phone_number: Optional phone number to filter messages by sender
         chat_jid: Optional chat JID to filter messages by chat
         query: Optional search term to filter messages by content
+        cursor: Optional cursor token for deterministic paging (base64-url encoded)
+        snapshot_at: Optional ISO-8601 timestamp to bound results at or before this time
         limit: Maximum number of messages to return (default 20)
-        page: Page number for pagination (default 0)
+        page: Page number for pagination (default 0, ignored when cursor is provided)
         include_context: Whether to include messages before and after matches (default True)
         context_before: Number of messages to include before each match (default 1)
         context_after: Number of messages to include after each match (default 1)
@@ -77,6 +84,8 @@ def list_messages(
             "sender_phone_number": sender_phone_number,
             "chat_jid": chat_jid,
             "query_present": bool(query),
+            "cursor_present": bool(cursor),
+            "snapshot_at": snapshot_at,
             "limit": limit,
             "page": page,
             "include_context": include_context,
@@ -90,6 +99,8 @@ def list_messages(
             sender_phone_number=sender_phone_number,
             chat_jid=chat_jid,
             query=query,
+            cursor=cursor,
+            snapshot_at=snapshot_at,
             limit=limit,
             page=page,
             include_context=include_context,
@@ -101,6 +112,66 @@ def list_messages(
         raise
     logger.info("list_messages result", extra={"count": len(messages)})
     return messages
+
+
+@mcp.tool()
+def partition_messages(
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    sender_phone_number: Optional[str] = None,
+    chat_jid: Optional[str] = None,
+    query: Optional[str] = None,
+    include_context: bool = True,
+    partition_size: int = DEFAULT_PARTITION_SIZE
+) -> Dict[str, Any]:
+    """Plan deterministic partitions for list_messages.
+
+    Args:
+        after: Optional ISO-8601 formatted string to only return messages after this date
+        before: Optional ISO-8601 formatted string to only return messages before this date
+        sender_phone_number: Optional phone number to filter messages by sender
+        chat_jid: Optional chat JID to filter messages by chat
+        query: Optional search term to filter messages by content
+        include_context: Whether to include messages before and after matches (default True)
+        partition_size: Maximum number of base messages per partition (default 1000)
+
+    Returns:
+        Dictionary with total_count, snapshot_at, and partitions list.
+    """
+    logger.info(
+        "partition_messages request",
+        extra={
+            "after": after,
+            "before": before,
+            "sender_phone_number": sender_phone_number,
+            "chat_jid": chat_jid,
+            "query_present": bool(query),
+            "include_context": include_context,
+            "partition_size": partition_size,
+        },
+    )
+    try:
+        result = whatsapp_partition_messages(
+            after=after,
+            before=before,
+            sender_phone_number=sender_phone_number,
+            chat_jid=chat_jid,
+            query=query,
+            include_context=include_context,
+            partition_size=partition_size,
+        )
+    except Exception:
+        logger.exception("partition_messages failed", extra={"chat_jid": chat_jid})
+        raise
+    logger.info(
+        "partition_messages result",
+        extra={
+            "total_count": result.get("total_count"),
+            "partition_count": len(result.get("partitions", [])),
+        },
+    )
+    return result
+
 
 @mcp.tool()
 def list_chats(
