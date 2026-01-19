@@ -6,7 +6,6 @@ import os.path
 import logging
 import requests
 import json
-import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
@@ -962,53 +961,6 @@ def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, "Error parsing response"
     except Exception:
         LOGGER.exception("Unexpected error in send_file", extra={"recipient": recipient})
-        return False, "Unexpected error"
-
-def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
-    try:
-        # Validate input
-        if not recipient:
-            return False, "Recipient must be provided"
-        
-        if not media_path:
-            return False, "Media path must be provided"
-        
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-
-        if not media_path.endswith(".ogg"):
-            try:
-                media_path = audio.convert_to_opus_ogg_temp(media_path)
-            except Exception as e:
-                LOGGER.exception("Audio conversion failed", extra={"recipient": recipient})
-                return False, f"Error converting file to opus ogg. You likely need to install ffmpeg: {str(e)}"
-        
-        url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
-            "recipient": recipient,
-            "media_path": media_path
-        }
-        
-        response = requests.post(url, json=payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        LOGGER.error(
-            "send_audio_message HTTP error",
-            extra={"recipient": recipient, "status_code": response.status_code},
-        )
-        return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
-    except requests.RequestException:
-        LOGGER.exception("Request error in send_audio_message", extra={"recipient": recipient})
-        return False, "Request error"
-    except json.JSONDecodeError:
-        LOGGER.exception("Response parse error in send_audio_message", extra={"recipient": recipient})
-        return False, "Error parsing response"
-    except Exception:
-        LOGGER.exception("Unexpected error in send_audio_message", extra={"recipient": recipient})
         return False, "Unexpected error"
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
