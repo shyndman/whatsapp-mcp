@@ -149,42 +149,44 @@ def list_chats(
     return chats
 
 @mcp.tool()
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
-    """Get WhatsApp chat metadata by JID.
+def get_chat(
+    chat_jid: Optional[str] = None,
+    sender_phone_number: Optional[str] = None,
+    include_last_message: bool = True
+) -> Optional[Dict[str, Any]]:
+    """Get WhatsApp chat metadata by JID or sender phone number.
     
     Args:
         chat_jid: The JID of the chat to retrieve
+        sender_phone_number: The phone number to search for when chat_jid is not provided
         include_last_message: Whether to include the last message (default True)
     """
-    logger.info("get_chat request", extra={"chat_jid": chat_jid, "include_last_message": include_last_message})
+    logger.info(
+        "get_chat request",
+        extra={
+            "chat_jid": chat_jid,
+            "sender_phone_number": sender_phone_number,
+            "include_last_message": include_last_message,
+        },
+    )
+    if not chat_jid and not sender_phone_number:
+        logger.error("get_chat missing identifier")
+        return None
     try:
-        chat = whatsapp_get_chat(chat_jid, include_last_message)
+        if chat_jid:
+            chat = whatsapp_get_chat(chat_jid, include_last_message)
+        else:
+            if sender_phone_number is None:
+                logger.error("get_chat missing sender_phone_number")
+                return None
+            chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
     except Exception:
-        logger.exception("get_chat failed", extra={"chat_jid": chat_jid})
+        logger.exception("get_chat failed", extra={"chat_jid": chat_jid, "sender_phone_number": sender_phone_number})
         raise
     if not chat:
-        logger.warning("get_chat missing", extra={"chat_jid": chat_jid})
+        logger.warning("get_chat missing", extra={"chat_jid": chat_jid, "sender_phone_number": sender_phone_number})
     else:
-        logger.info("get_chat result", extra={"chat_jid": chat_jid})
-    return chat
-
-@mcp.tool()
-def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
-    """Get WhatsApp chat metadata by sender phone number.
-    
-    Args:
-        sender_phone_number: The phone number to search for
-    """
-    logger.info("get_direct_chat_by_contact request", extra={"sender_phone_number": sender_phone_number})
-    try:
-        chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
-    except Exception:
-        logger.exception("get_direct_chat_by_contact failed", extra={"sender_phone_number": sender_phone_number})
-        raise
-    if not chat:
-        logger.warning("get_direct_chat_by_contact missing", extra={"sender_phone_number": sender_phone_number})
-    else:
-        logger.info("get_direct_chat_by_contact result", extra={"sender_phone_number": sender_phone_number})
+        logger.info("get_chat result", extra={"chat_jid": chat_jid, "sender_phone_number": sender_phone_number})
     return chat
 
 @mcp.tool()
