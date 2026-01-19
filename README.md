@@ -1,5 +1,7 @@
 # WhatsApp MCP
 
+> This fork aims to make the MCP server generally more usable by trimming tool surface (and context usage) while also enabling parallel sub-agent workflows (see `partition_messages` and `list_messages`).
+
 WhatsApp MCP is a two-process stack that exposes a Model Context Protocol (MCP) server for WhatsApp operations. It bundles:
 
 - `whatsapp-bridge/`: Go-based WhatsApp bridge exposing a REST API on `http://localhost:8080/api`.
@@ -110,7 +112,7 @@ Returns:
 
 ### `partition_messages`
 
-Plans deterministic partitions for large message listings.
+Plans deterministic partitions for large message listings, so callers can set up parallel sub-agent calls.
 
 Parameters:
 
