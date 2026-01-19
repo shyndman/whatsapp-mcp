@@ -889,79 +889,48 @@ def get_direct_chat_by_contact(sender_phone_number: str) -> Optional[Dict[str, A
             conn.close()
  
 
-def send_message(recipient: str, message: str) -> Tuple[bool, str]:
+def send(recipient: str, message: Optional[str] = None, media_path: Optional[str] = None) -> Tuple[bool, str]:
     try:
-        # Validate input
         if not recipient:
             return False, "Recipient must be provided"
-        
+
+        if not message and not media_path:
+            return False, "Message or media path must be provided"
+
+        if media_path:
+            if not os.path.isfile(media_path):
+                return False, f"Media file not found: {media_path}"
+
         url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
+        payload: Dict[str, Any] = {
             "recipient": recipient,
-            "message": message,
         }
-        
+        if message:
+            payload["message"] = message
+        if media_path:
+            payload["media_path"] = media_path
+
         response = requests.post(url, json=payload)
-        
-        # Check if the request was successful
+
         if response.status_code == 200:
             result = response.json()
             return result.get("success", False), result.get("message", "Unknown response")
         LOGGER.error(
-            "send_message HTTP error",
+            "send HTTP error",
             extra={"recipient": recipient, "status_code": response.status_code},
         )
         return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
+
     except requests.RequestException:
-        LOGGER.exception("Request error in send_message", extra={"recipient": recipient})
+        LOGGER.exception("Request error in send", extra={"recipient": recipient})
         return False, "Request error"
     except json.JSONDecodeError:
-        LOGGER.exception("Response parse error in send_message", extra={"recipient": recipient})
+        LOGGER.exception("Response parse error in send", extra={"recipient": recipient})
         return False, "Error parsing response"
     except Exception:
-        LOGGER.exception("Unexpected error in send_message", extra={"recipient": recipient})
+        LOGGER.exception("Unexpected error in send", extra={"recipient": recipient})
         return False, "Unexpected error"
 
-def send_file(recipient: str, media_path: str) -> Tuple[bool, str]:
-    try:
-        # Validate input
-        if not recipient:
-            return False, "Recipient must be provided"
-        
-        if not media_path:
-            return False, "Media path must be provided"
-        
-        if not os.path.isfile(media_path):
-            return False, f"Media file not found: {media_path}"
-        
-        url = f"{WHATSAPP_API_BASE_URL}/send"
-        payload = {
-            "recipient": recipient,
-            "media_path": media_path
-        }
-        
-        response = requests.post(url, json=payload)
-        
-        # Check if the request was successful
-        if response.status_code == 200:
-            result = response.json()
-            return result.get("success", False), result.get("message", "Unknown response")
-        LOGGER.error(
-            "send_file HTTP error",
-            extra={"recipient": recipient, "status_code": response.status_code},
-        )
-        return False, f"Error: HTTP {response.status_code} - {response.text}"
-            
-    except requests.RequestException:
-        LOGGER.exception("Request error in send_file", extra={"recipient": recipient})
-        return False, "Request error"
-    except json.JSONDecodeError:
-        LOGGER.exception("Response parse error in send_file", extra={"recipient": recipient})
-        return False, "Error parsing response"
-    except Exception:
-        LOGGER.exception("Unexpected error in send_file", extra={"recipient": recipient})
-        return False, "Unexpected error"
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.
