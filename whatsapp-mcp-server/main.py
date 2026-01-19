@@ -10,8 +10,6 @@ from whatsapp import (
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
     get_contact_chats as whatsapp_get_contact_chats,
-    get_last_interaction as whatsapp_get_last_interaction,
-    get_message_context as whatsapp_get_message_context,
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
@@ -42,6 +40,7 @@ def search_contacts(query: str) -> List[Dict[str, Any]]:
 
 @mcp.tool()
 def list_messages(
+    message_id: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
     sender_phone_number: Optional[str] = None,
@@ -56,6 +55,7 @@ def list_messages(
     """Get WhatsApp messages matching specified criteria with optional context.
     
     Args:
+        message_id: Optional message ID to fetch with surrounding context (other filters ignored)
         after: Optional ISO-8601 formatted string to only return messages after this date
         before: Optional ISO-8601 formatted string to only return messages before this date
         sender_phone_number: Optional phone number to filter messages by sender
@@ -74,6 +74,7 @@ def list_messages(
     logger.info(
         "list_messages request",
         extra={
+            "message_id": message_id,
             "after": after,
             "before": before,
             "sender_phone_number": sender_phone_number,
@@ -86,6 +87,7 @@ def list_messages(
     )
     try:
         messages = whatsapp_list_messages(
+            message_id=message_id,
             after=after,
             before=before,
             sender_phone_number=sender_phone_number,
@@ -206,50 +208,6 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str
         raise
     logger.info("get_contact_chats result", extra={"count": len(chats), "jid": jid})
     return chats
-
-@mcp.tool()
-def get_last_interaction(jid: str) -> str:
-    """Get most recent WhatsApp message involving the contact.
-    
-    Args:
-        jid: The JID of the contact to search for
-    """
-    logger.info("get_last_interaction request", extra={"jid": jid})
-    try:
-        message = whatsapp_get_last_interaction(jid)
-    except Exception:
-        logger.exception("get_last_interaction failed", extra={"jid": jid})
-        raise
-    if not message:
-        logger.warning("get_last_interaction missing", extra={"jid": jid})
-    else:
-        logger.info("get_last_interaction result", extra={"jid": jid})
-    return message
-
-@mcp.tool()
-def get_message_context(
-    message_id: str,
-    before: int = 5,
-    after: int = 5
-) -> Dict[str, Any]:
-    """Get context around a specific WhatsApp message.
-    
-    Args:
-        message_id: The ID of the message to get context for
-        before: Number of messages to include before the target message (default 5)
-        after: Number of messages to include after the target message (default 5)
-    """
-    logger.info("get_message_context request", extra={"message_id": message_id, "before": before, "after": after})
-    try:
-        context = whatsapp_get_message_context(message_id, before, after)
-    except ValueError:
-        logger.warning("get_message_context missing", extra={"message_id": message_id}, exc_info=True)
-        raise
-    except Exception:
-        logger.exception("get_message_context failed", extra={"message_id": message_id})
-        raise
-    logger.info("get_message_context result", extra={"message_id": message_id})
-    return context
 
 @mcp.tool()
 def send_message(

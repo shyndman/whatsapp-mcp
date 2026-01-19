@@ -303,6 +303,7 @@ def chat_to_dict(chat: Chat) -> Dict[str, Any]:
 
 
 def list_messages(
+    message_id: Optional[str] = None,
     after: Optional[str] = None,
     before: Optional[str] = None,
     sender_phone_number: Optional[str] = None,
@@ -315,6 +316,22 @@ def list_messages(
     context_after: int = 1
 ) -> List[Dict[str, Any]]:
     """Get messages matching the specified criteria with optional context."""
+    if message_id:
+        try:
+            context = get_message_context(message_id, context_before, context_after)
+        except ValueError:
+            LOGGER.warning("list_messages missing message_id", extra={"message_id": message_id})
+            return []
+        except sqlite3.Error:
+            LOGGER.exception("Database error in list_messages", extra={"message_id": message_id})
+            return []
+        messages = (
+            context.before + [context.message] + context.after
+            if include_context
+            else [context.message]
+        )
+        return [message_to_dict(message) for message in messages]
+
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
