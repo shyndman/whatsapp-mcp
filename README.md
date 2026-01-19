@@ -1,6 +1,14 @@
 # WhatsApp MCP
 
-> This fork aims to make the MCP server generally more usable by trimming tool surface (and context usage) while also enabling parallel sub-agent workflows (see `partition_messages` and `list_messages`).
+> This fork aims to make the MCP server generally more usable by trimming tool surface
+> (and context usage) while also enabling parallel sub-agent workflows (see
+> `partition_messages` and `list_messages`).
+
+> ⚠️☠️🚨 **Security note**: This MCP ingests messages from untrusted sources — other
+> people. If connected to an agent with outbound capabilities (web requests, email, other
+> messaging tools, this MCP's `send_message`), a malicious message could potentially
+> instruct the agent to exfiltrate conversation contents. Consider running read-only
+> and/or isolating this MCP from agents with sensitive tool access.
 
 WhatsApp MCP is a two-process stack that exposes a Model Context Protocol (MCP) server for WhatsApp operations. It bundles:
 
@@ -161,6 +169,8 @@ Returns:
 ### `send`
 
 Sends a text message or media file.
+
+> ⚠️ **Send tool gating**: The `send` tool is only exposed when `WHATSAPP_ALLOW_SEND=true` is set in the MCP server environment.
 
 Parameters:
 

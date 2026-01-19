@@ -1,9 +1,11 @@
 from typing import List, Dict, Any, Optional
 import logging
+import os
 
 from fastmcp import FastMCP
 from logging_config import configure_logging
 from whatsapp import (
+    Contact,
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
     partition_messages as whatsapp_partition_messages,
@@ -18,12 +20,20 @@ configure_logging()
 logger = logging.getLogger("whatsapp-mcp")
 
 DEFAULT_PARTITION_SIZE = 1000
+ALLOW_SEND_ENV_VAR = "WHATSAPP_ALLOW_SEND"
+ALLOW_SEND_ENV_VALUE = "true"
+ALLOW_SEND = os.getenv(ALLOW_SEND_ENV_VAR) == ALLOW_SEND_ENV_VALUE
+
+if ALLOW_SEND:
+    logger.info("send tool enabled", extra={"env_var": ALLOW_SEND_ENV_VAR})
+else:
+    logger.warning("send tool disabled", extra={"env_var": ALLOW_SEND_ENV_VAR})
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
 
 @mcp.tool()
-def search_contacts(query: str) -> List[Dict[str, Any]]:
+def search_contacts(query: str) -> List[Contact]:
     """Search WhatsApp contacts by name or phone number.
     
     Args:
@@ -263,58 +273,59 @@ def get_chat(
         logger.info("get_chat result", extra={"chat_jid": chat_jid, "sender_phone_number": sender_phone_number})
     return chat
 
-@mcp.tool()
-def send(
-    recipient: str,
-    message: Optional[str] = None,
-    media_path: Optional[str] = None
-) -> Dict[str, Any]:
-    """Send a WhatsApp message or media to a person or group. For group chats use the JID.
+if ALLOW_SEND:
+    @mcp.tool()
+    def send(
+        recipient: str,
+        message: Optional[str] = None,
+        media_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Send a WhatsApp message or media to a person or group. For group chats use the JID.
 
-    Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        message: The message text to send
-        media_path: The absolute path to the media file to send (image, video, document)
+        Args:
+            recipient: The recipient - either a phone number with country code but no + or other symbols,
+                     or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+            message: The message text to send
+            media_path: The absolute path to the media file to send (image, video, document)
 
-    Returns:
-        A dictionary containing success status and a status message
-    """
-    logger.info(
-        "send request",
-        extra={
-            "recipient": recipient,
-            "has_message": bool(message),
-            "has_media": bool(media_path),
-        },
-    )
-    if not recipient:
-        logger.error("send missing recipient")
-        return {
-            "success": False,
-            "message": "Recipient must be provided",
-        }
-    if not message and not media_path:
-        logger.error("send missing payload", extra={"recipient": recipient})
-        return {
-            "success": False,
-            "message": "Message or media path must be provided",
-        }
-
-    try:
-        success, status_message = whatsapp_send(
-            recipient,
-            message=message,
-            media_path=media_path,
+        Returns:
+            A dictionary containing success status and a status message
+        """
+        logger.info(
+            "send request",
+            extra={
+                "recipient": recipient,
+                "has_message": bool(message),
+                "has_media": bool(media_path),
+            },
         )
-    except Exception:
-        logger.exception("send failed", extra={"recipient": recipient})
-        raise
-    logger.info("send result", extra={"recipient": recipient, "success": success})
-    return {
-        "success": success,
-        "message": status_message,
-    }
+        if not recipient:
+            logger.error("send missing recipient")
+            return {
+                "success": False,
+                "message": "Recipient must be provided",
+            }
+        if not message and not media_path:
+            logger.error("send missing payload", extra={"recipient": recipient})
+            return {
+                "success": False,
+                "message": "Message or media path must be provided",
+            }
+
+        try:
+            success, status_message = whatsapp_send(
+                recipient,
+                message=message,
+                media_path=media_path,
+            )
+        except Exception:
+            logger.exception("send failed", extra={"recipient": recipient})
+            raise
+        logger.info("send result", extra={"recipient": recipient, "success": success})
+        return {
+            "success": success,
+            "message": status_message,
+        }
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
