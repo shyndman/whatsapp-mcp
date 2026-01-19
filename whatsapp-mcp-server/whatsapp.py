@@ -537,13 +537,14 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    contact_jid: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Get chats matching the specified criteria."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
-        
+
         # Build base query
         query_parts = ["""
             SELECT 
@@ -555,32 +556,41 @@ def list_chats(
                 messages.is_from_me as last_is_from_me
             FROM chats
         """]
-        
+
         if include_last_message:
             query_parts.append("""
                 LEFT JOIN messages ON chats.jid = messages.chat_jid 
                 AND chats.last_message_time = messages.timestamp
             """)
-            
+
         where_clauses = []
         params = []
-        
+
         if query:
             where_clauses.append("(LOWER(chats.name) LIKE LOWER(?) OR chats.jid LIKE ?)")
             params.extend([f"%{query}%", f"%{query}%"])
-            
+
+        if contact_jid:
+            where_clauses.append(
+                "(chats.jid = ? OR EXISTS ("
+                "SELECT 1 FROM messages contact_messages "
+                "WHERE contact_messages.chat_jid = chats.jid "
+                "AND contact_messages.sender = ?))"
+            )
+            params.extend([contact_jid, contact_jid])
+
         if where_clauses:
             query_parts.append("WHERE " + " AND ".join(where_clauses))
-            
+
         # Add sorting
         order_by = "chats.last_message_time DESC" if sort_by == "last_active" else "chats.name"
         query_parts.append(f"ORDER BY {order_by}")
-        
+
         # Add pagination
         offset = (page ) * limit
         query_parts.append("LIMIT ? OFFSET ?")
         params.extend([limit, offset])
-        
+
         cursor.execute(" ".join(query_parts), tuple(params))
         chats = cursor.fetchall()
 
@@ -665,62 +675,6 @@ def search_contacts(query: str) -> List[Contact]:
 
     except sqlite3.Error:
         LOGGER.exception("Database error in search_contacts", extra={"query_present": bool(query)})
-        return []
-    finally:
-        if 'conn' in locals():
-            conn.close()
-
-
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
-    """Get all chats involving the contact.
-    
-    Args:
-        jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
-        page: Page number for pagination (default 0)
-    """
-    try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT DISTINCT
-                c.jid,
-                c.name,
-                c.last_message_time,
-                m.content as last_message,
-                m.sender as last_sender,
-                m.is_from_me as last_is_from_me
-            FROM chats c
-            JOIN messages m ON c.jid = m.chat_jid
-            WHERE m.sender = ? OR c.jid = ?
-            ORDER BY c.last_message_time DESC
-            LIMIT ? OFFSET ?
-        """, (jid, jid, limit, page * limit))
-        
-        chats = cursor.fetchall()
-        
-        result = []
-        for chat_data in chats:
-            chat_jid = chat_data[0]
-            chat_name = resolve_chat_name(chat_jid, chat_data[1])
-            last_sender = chat_data[4]
-            last_sender_name = resolve_sender_name(last_sender, chat_jid) if last_sender else None
-            chat = Chat(
-                jid=chat_jid,
-                name=chat_name,
-                last_message_time=datetime.fromisoformat(chat_data[2]) if chat_data[2] else None,
-                last_message=chat_data[3],
-                last_sender=last_sender,
-                last_sender_name=last_sender_name,
-                last_is_from_me=chat_data[5]
-            )
-            result.append(chat)
-
-        return [chat_to_dict(chat) for chat in result]
-        
-    except sqlite3.Error:
-        LOGGER.exception("Database error in get_contact_chats", extra={"jid": jid})
         return []
     finally:
         if 'conn' in locals():

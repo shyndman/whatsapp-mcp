@@ -9,7 +9,6 @@ from whatsapp import (
     list_chats as whatsapp_list_chats,
     get_chat as whatsapp_get_chat,
     get_direct_chat_by_contact as whatsapp_get_direct_chat_by_contact,
-    get_contact_chats as whatsapp_get_contact_chats,
     send as whatsapp_send,
     download_media as whatsapp_download_media
 )
@@ -109,7 +108,8 @@ def list_chats(
     limit: int = 20,
     page: int = 0,
     include_last_message: bool = True,
-    sort_by: str = "last_active"
+    sort_by: str = "last_active",
+    contact_jid: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Get WhatsApp chats matching specified criteria.
     
@@ -119,6 +119,7 @@ def list_chats(
         page: Page number for pagination (default 0)
         include_last_message: Whether to include the last message in each chat (default True)
         sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        contact_jid: Optional contact JID to filter chats involving the contact
 
     Returns:
         List of chat objects with fields: jid, name, last_message_time, last_message, last_sender,
@@ -132,6 +133,7 @@ def list_chats(
             "page": page,
             "include_last_message": include_last_message,
             "sort_by": sort_by,
+            "contact_jid": contact_jid,
         },
     )
     try:
@@ -141,6 +143,7 @@ def list_chats(
             page=page,
             include_last_message=include_last_message,
             sort_by=sort_by,
+            contact_jid=contact_jid,
         )
     except Exception:
         logger.exception("list_chats failed", extra={"query_present": bool(query)})
@@ -188,24 +191,6 @@ def get_chat(
     else:
         logger.info("get_chat result", extra={"chat_jid": chat_jid, "sender_phone_number": sender_phone_number})
     return chat
-
-@mcp.tool()
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
-    """Get all WhatsApp chats involving the contact.
-    
-    Args:
-        jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
-        page: Page number for pagination (default 0)
-    """
-    logger.info("get_contact_chats request", extra={"jid": jid, "limit": limit, "page": page})
-    try:
-        chats = whatsapp_get_contact_chats(jid, limit, page)
-    except Exception:
-        logger.exception("get_contact_chats failed", extra={"jid": jid})
-        raise
-    logger.info("get_contact_chats result", extra={"count": len(chats), "jid": jid})
-    return chats
 
 @mcp.tool()
 def send(
