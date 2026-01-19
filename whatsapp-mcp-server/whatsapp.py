@@ -63,6 +63,21 @@ def normalize_contact_value(value: Optional[str]) -> Optional[str]:
     return trimmed if trimmed else None
 
 
+def derive_last_name(first_name: Optional[str], full_name: Optional[str]) -> Optional[str]:
+    if not first_name or not full_name:
+        return None
+    first_trimmed = first_name.strip()
+    full_trimmed = full_name.strip()
+    if not first_trimmed or not full_trimmed:
+        return None
+    lower_first = first_trimmed.lower()
+    lower_full = full_trimmed.lower()
+    if not lower_full.startswith(lower_first):
+        return None
+    remainder = full_trimmed[len(first_trimmed):].strip()
+    return remainder if remainder else None
+
+
 def is_numeric_name(name: Optional[str]) -> bool:
     if not name:
         return False
@@ -72,6 +87,13 @@ def is_numeric_name(name: Optional[str]) -> bool:
 
 def select_contact_display_name(contact: Dict[str, Optional[str]]) -> Optional[str]:
     """Choose the highest-priority contact name."""
+    first_name = normalize_contact_value(contact.get("first_name"))
+    full_name = normalize_contact_value(contact.get("full_name"))
+    last_name = normalize_contact_value(contact.get("last_name"))
+    if not last_name:
+        last_name = derive_last_name(first_name, full_name)
+    if first_name and last_name:
+        return f"{first_name} {last_name}"
     for field in CONTACT_NAME_PRIORITY:
         value = normalize_contact_value(contact.get(field))
         if value:
@@ -577,37 +599,54 @@ def list_chats(
 def search_contacts(query: str) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
-        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        conn = sqlite3.connect(WHATSAPP_DB_PATH)
         cursor = conn.cursor()
-        
-        # Split query into characters to support partial matching
-        search_pattern = '%' +query + '%'
-        
+
+        search_pattern = '%' + query + '%'
+        params = (search_pattern,) * 6
+
         cursor.execute("""
-            SELECT DISTINCT 
-                jid,
-                name
-            FROM chats
-            WHERE 
-                (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
-                AND jid NOT LIKE '%@g.us'
-            ORDER BY name, jid
+            SELECT DISTINCT
+                their_jid,
+                first_name,
+                full_name,
+                push_name,
+                business_name,
+                redacted_phone
+            FROM whatsmeow_contacts
+            WHERE
+                (LOWER(first_name) LIKE LOWER(?)
+                 OR LOWER(full_name) LIKE LOWER(?)
+                 OR LOWER(push_name) LIKE LOWER(?)
+                 OR LOWER(business_name) LIKE LOWER(?)
+                 OR LOWER(redacted_phone) LIKE LOWER(?)
+                 OR LOWER(their_jid) LIKE LOWER(?))
+                AND their_jid NOT LIKE '%@g.us'
+            ORDER BY full_name, first_name, push_name, their_jid
             LIMIT 50
-        """, (search_pattern, search_pattern))
-        
+        """, params)
+
         contacts = cursor.fetchall()
-        
+
         result = []
         for contact_data in contacts:
-            contact = Contact(
+            contact = {
+                "their_jid": contact_data[0],
+                "first_name": contact_data[1],
+                "full_name": contact_data[2],
+                "push_name": contact_data[3],
+                "business_name": contact_data[4],
+            }
+            display_name = select_contact_display_name(contact)
+            contact_entry = Contact(
                 phone_number=contact_data[0].split('@')[0],
-                name=contact_data[1],
+                name=display_name,
                 jid=contact_data[0]
             )
-            result.append(contact)
-            
+            result.append(contact_entry)
+
         return result
-        
+
     except sqlite3.Error:
         LOGGER.exception("Database error in search_contacts", extra={"query_present": bool(query)})
         return []
