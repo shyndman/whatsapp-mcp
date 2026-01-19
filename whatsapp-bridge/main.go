@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -20,9 +23,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-
-	"bytes"
-
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -35,6 +35,16 @@ import (
 const (
 	historySyncCountEnvVar  = "WHATSAPP_HISTORY_SYNC_COUNT"
 	defaultHistorySyncCount = 1000
+
+	mediaTypeImage    = "image"
+	mediaTypeVideo    = "video"
+	mediaTypeAudio    = "audio"
+	mediaTypeDocument = "document"
+
+	imageFileExtension           = ".jpg"
+	videoFileExtension           = ".mp4"
+	audioFileExtension           = ".ogg"
+	defaultDocumentFileExtension = ".bin"
 )
 
 var historySyncCount = defaultHistorySyncCount
@@ -195,6 +205,47 @@ func extractTextContent(msg *waProto.Message) string {
 
 	// For now, we're ignoring non-text messages
 	return ""
+}
+
+func documentExtension(filename string) string {
+	extension := filepath.Ext(filename)
+	if extension == "" {
+		return defaultDocumentFileExtension
+	}
+	return extension
+}
+
+func mediaFileExtension(mediaType, originalFilename string) (string, error) {
+	switch mediaType {
+	case mediaTypeImage:
+		return imageFileExtension, nil
+	case mediaTypeVideo:
+		return videoFileExtension, nil
+	case mediaTypeAudio:
+		return audioFileExtension, nil
+	case mediaTypeDocument:
+		return documentExtension(originalFilename), nil
+	default:
+		return "", fmt.Errorf("unsupported media type: %s", mediaType)
+	}
+}
+
+func buildMediaFilename(mediaType string, fileEncSHA256 []byte, originalFilename string) (string, error) {
+	if len(fileEncSHA256) == 0 {
+		return "", nil
+	}
+
+	extension, err := mediaFileExtension(mediaType, originalFilename)
+	if err != nil {
+		return "", err
+	}
+
+	return hex.EncodeToString(fileEncSHA256) + extension, nil
+}
+
+func sha256Bytes(data []byte) []byte {
+	sum := sha256.Sum256(data)
+	return sum[:]
 }
 
 // SendMessageResponse represents the response for the send message API
@@ -387,29 +438,45 @@ func extractMediaInfo(msg *waProto.Message) (mediaType string, filename string, 
 
 	// Check for image message
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + time.Now().Format("20060102_150405") + ".jpg",
+		generatedFilename, err := buildMediaFilename(mediaTypeImage, img.GetFileEncSHA256(), "")
+		if err != nil {
+			generatedFilename = ""
+		}
+		return mediaTypeImage, generatedFilename,
 			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
 	}
 
 	// Check for video message
 	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + time.Now().Format("20060102_150405") + ".mp4",
+		generatedFilename, err := buildMediaFilename(mediaTypeVideo, vid.GetFileEncSHA256(), "")
+		if err != nil {
+			generatedFilename = ""
+		}
+		return mediaTypeVideo, generatedFilename,
 			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
 	}
 
 	// Check for audio message
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + time.Now().Format("20060102_150405") + ".ogg",
+		generatedFilename, err := buildMediaFilename(mediaTypeAudio, aud.GetFileEncSHA256(), "")
+		if err != nil {
+			generatedFilename = ""
+		}
+		return mediaTypeAudio, generatedFilename,
 			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
 	}
 
 	// Check for document message
 	if doc := msg.GetDocumentMessage(); doc != nil {
-		filename := doc.GetFileName()
-		if filename == "" {
-			filename = "document_" + time.Now().Format("20060102_150405")
+		originalFilename := doc.GetFileName()
+		generatedFilename, err := buildMediaFilename(mediaTypeDocument, doc.GetFileEncSHA256(), originalFilename)
+		if err != nil {
+			generatedFilename = ""
 		}
-		return "document", filename,
+		if generatedFilename == "" && originalFilename != "" {
+			generatedFilename = originalFilename
+		}
+		return mediaTypeDocument, generatedFilename,
 			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
 	}
 
@@ -501,6 +568,24 @@ func (store *MessageStore) StoreMediaInfo(id, chatJID, url string, mediaKey, fil
 	return err
 }
 
+// Update media filename in the database
+func (store *MessageStore) UpdateMediaFilename(id, chatJID, filename string) error {
+	_, err := store.db.Exec(
+		"UPDATE messages SET filename = ? WHERE id = ? AND chat_jid = ?",
+		filename, id, chatJID,
+	)
+	return err
+}
+
+// Update media hash and filename in the database
+func (store *MessageStore) UpdateMediaHashAndFilename(id, chatJID string, fileEncSHA256 []byte, filename string) error {
+	_, err := store.db.Exec(
+		"UPDATE messages SET file_enc_sha256 = ?, filename = ? WHERE id = ? AND chat_jid = ?",
+		fileEncSHA256, filename, id, chatJID,
+	)
+	return err
+}
+
 // Get media info from the database
 func (store *MessageStore) GetMediaInfo(id, chatJID string) (string, string, string, []byte, []byte, []byte, uint64, error) {
 	var mediaType, filename, url string
@@ -572,6 +657,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// First, check if we already have this file
 	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
 	localPath := ""
+	absPath := ""
 
 	// Get media info from the database
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err = messageStore.GetMediaInfo(messageID, chatJID)
@@ -598,23 +684,33 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
-
-	// Get absolute path
-	absPath, err := filepath.Abs(localPath)
+	resolvedFilename, err := buildMediaFilename(mediaType, fileEncSHA256, filename)
 	if err != nil {
-		return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
+		return false, "", "", "", err
+	}
+	if resolvedFilename != "" && resolvedFilename != filename {
+		filename = resolvedFilename
+		if err := messageStore.UpdateMediaFilename(messageID, chatJID, filename); err != nil {
+			return false, "", "", "", fmt.Errorf("failed to update media filename: %v", err)
+		}
 	}
 
-	// Check if file already exists
-	if _, err := os.Stat(localPath); err == nil {
-		// File exists, return it
-		return true, mediaType, filename, absPath, nil
+	if filename != "" {
+		localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+		absPath, err = filepath.Abs(localPath)
+		if err != nil {
+			return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
+		}
+
+		// Check if file already exists
+		if _, err := os.Stat(localPath); err == nil {
+			// File exists, return it
+			return true, mediaType, filename, absPath, nil
+		}
 	}
 
 	// If we don't have all the media info we need, we can't download
-	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || len(fileEncSHA256) == 0 || fileLength == 0 {
+	if url == "" || len(mediaKey) == 0 || len(fileSHA256) == 0 || fileLength == 0 {
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
@@ -626,13 +722,13 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	// Create a downloader that implements DownloadableMessage
 	var waMediaType whatsmeow.MediaType
 	switch mediaType {
-	case "image":
+	case mediaTypeImage:
 		waMediaType = whatsmeow.MediaImage
-	case "video":
+	case mediaTypeVideo:
 		waMediaType = whatsmeow.MediaVideo
-	case "audio":
+	case mediaTypeAudio:
 		waMediaType = whatsmeow.MediaAudio
-	case "document":
+	case mediaTypeDocument:
 		waMediaType = whatsmeow.MediaDocument
 	default:
 		return false, "", "", "", fmt.Errorf("unsupported media type: %s", mediaType)
@@ -652,6 +748,40 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
+	}
+
+	if len(fileEncSHA256) == 0 {
+		fileEncSHA256 = sha256Bytes(mediaData)
+		updatedFilename, err := buildMediaFilename(mediaType, fileEncSHA256, filename)
+		if err != nil {
+			return false, "", "", "", err
+		}
+		if updatedFilename != "" {
+			filename = updatedFilename
+		}
+		if err := messageStore.UpdateMediaHashAndFilename(messageID, chatJID, fileEncSHA256, filename); err != nil {
+			return false, "", "", "", fmt.Errorf("failed to update media hash: %v", err)
+		}
+		localPath = fmt.Sprintf("%s/%s", chatDir, filename)
+		absPath, err = filepath.Abs(localPath)
+		if err != nil {
+			return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
+		}
+
+		if _, err := os.Stat(localPath); err == nil {
+			return true, mediaType, filename, absPath, nil
+		}
+	}
+
+	if localPath == "" {
+		return false, "", "", "", fmt.Errorf("missing media filename")
+	}
+
+	if absPath == "" {
+		absPath, err = filepath.Abs(localPath)
+		if err != nil {
+			return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
+		}
 	}
 
 	// Save the downloaded media to file
